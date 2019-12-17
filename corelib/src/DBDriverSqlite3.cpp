@@ -35,6 +35,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "rtabmap/core/Compression.h"
 #include "DatabaseSchema_sql.h"
 #include <set>
+#include <fstream>
+#include <iostream>
 
 #include "rtabmap/utilite/UtiLite.h"
 
@@ -2373,14 +2375,14 @@ void DBDriverSqlite3::getAllNodeIdsQuery(std::set<int> & ids, bool ignoreChildre
 			  << "FROM Node ";
 		if(ignoreChildren)
 		{
-			query << "INNER JOIN Link ";
-			query << "ON id = to_id "; // use to_id to ignore all children (which don't have link pointing on them)
-			query << "WHERE from_id != to_id "; // ignore self referring links
+                        query << "INNER JOIN Link ";
+	                query << "ON id = to_id "; // use to_id to ignore all children (which don't have link pointing on them)
+		        query << "WHERE from_id != to_id "; // ignore self referring links
 		}
 
 		if(ignoreBadSignatures)
 		{
-			if(ignoreChildren)
+                        if(ignoreChildren)
 			{
 				query << "AND ";
 			}
@@ -2388,13 +2390,14 @@ void DBDriverSqlite3::getAllNodeIdsQuery(std::set<int> & ids, bool ignoreChildre
 			{
 				query << "WHERE ";
 			}
+
 			if(uStrNumCmp(_version, "0.13.0") >= 0)
 			{
-				query << " id in (select node_id from Feature) ";
+                                query << " id in (select node_id from Feature) ";
 			}
 			else
 			{
-				query << " id in (select node_id from Map_Node_Word) ";
+                                query << " id in (select node_id from Map_Node_Word) ";
 			}
 		}
 		query  << "ORDER BY id";
@@ -3522,42 +3525,47 @@ void DBDriverSqlite3::loadQuery(VWDictionary * dictionary, bool lastStateOnly) c
 //may be slower than the previous version but don't have a limit of words that can be loaded at the same time
 void DBDriverSqlite3::loadWordsQuery(const std::set<int> & wordIds, std::list<VisualWord *> & vws) const
 {
-	ULOGGER_DEBUG("size=%d", wordIds.size());
-	if(_ppDb && wordIds.size())
-	{
-		std::string type;
-		UTimer timer;
-		timer.start();
-		int rc = SQLITE_OK;
-		sqlite3_stmt * ppStmt = 0;
-		std::stringstream query;
-		std::set<int> loaded;
+        std::string build_flag = "/home/jseng/build_cache"; //JS
+        std::string word_cache_file = "/home/jseng/word_cache"; 
 
-		// Get the map from signature and visual words
-		query << "SELECT vw.descriptor_size, vw.descriptor "
-				 "FROM Word as vw "
-				 "WHERE vw.id = ?;";
+        std::ifstream ifile(build_flag);
+        std::ofstream cache_fd;
+        std::ifstream cache_read_fd;
+        bool write_cache = false;
+        bool read_cache_successful = false;
 
-		rc = sqlite3_prepare_v2(_ppDb, query.str().c_str(), -1, &ppStmt, 0);
-		UASSERT_MSG(rc == SQLITE_OK, uFormat("DB error (%s): %s", _version.c_str(), sqlite3_errmsg(_ppDb)).c_str());
+        //check if the request file to build the cache exists
+        if (ifile.good()) {
+                ifile.close();
+                std::cout << "build_cache exists...";
+                //check if the word cache already exists
+                std::ifstream cache_file_test(word_cache_file);
 
-		int descriptorSize;
-		const void * descriptor;
-		int dRealSize;
-		for(std::set<int>::const_iterator iter=wordIds.begin(); iter!=wordIds.end(); ++iter)
-		{
-			// bind id
-			rc = sqlite3_bind_int(ppStmt, 1, *iter);
-			UASSERT_MSG(rc == SQLITE_OK, uFormat("DB error (%s): %s", _version.c_str(), sqlite3_errmsg(_ppDb)).c_str());
+                if (!cache_file_test.good()) { //does not exist
+                        write_cache = true;
+                        cache_fd.open(word_cache_file,std::ios::out|std::ios::binary);
+                        std::cout << "Building word cache...";
+                } else {
+                        //the word cache does exist, so read it in
+                        cache_file_test.close();
 
-			// Process the result if one
-			rc = sqlite3_step(ppStmt);
-			if(rc == SQLITE_ROW)
-			{
-				int index = 0;
-				descriptorSize = sqlite3_column_int(ppStmt, index++); // VisualWord descriptor size
-				descriptor = sqlite3_column_blob(ppStmt, index); 	// VisualWord descriptor array
-				dRealSize = sqlite3_column_bytes(ppStmt, index++);
+                        UTimer timer;
+                        timer.start();
+                        cache_read_fd.open(word_cache_file,std::ios::in|std::ios::binary);
+	                ULOGGER_DEBUG("size=%d", wordIds.size());
+	                ULOGGER_DEBUG("-----------using word cache-------------");
+
+                        int descriptorSize=32;
+                        unsigned char temp_descriptor[32];
+                        const void * descriptor = temp_descriptor;
+                        int dRealSize=32;
+                        std::set<int> loaded;
+
+                        for(std::set<int>::const_iterator iter=wordIds.begin(); iter!=wordIds.end(); ++iter)
+                        {
+                                char* a = (char*) &dRealSize;
+                                cache_read_fd.read((char*) a,4); 
+                                cache_read_fd.read((char*) descriptor,dRealSize); 
 
 				cv::Mat d;
 				if(dRealSize == descriptorSize)
@@ -3583,19 +3591,114 @@ void DBDriverSqlite3::loadWordsQuery(const std::set<int> & wordIds, std::list<Vi
 				}
 				vws.push_back(vw);
 				loaded.insert(loaded.end(), *iter);
+                        }
 
-				rc = sqlite3_step(ppStmt);
-			}
+                        read_cache_successful = true;
+                        ULOGGER_DEBUG("Time=%fs", timer.ticks());
 
-			UASSERT_MSG(rc == SQLITE_DONE, uFormat("DB error (%s): %s", _version.c_str(), sqlite3_errmsg(_ppDb)).c_str());
+                        if(wordIds.size() != loaded.size())
+                        {
+                                for(std::set<int>::const_iterator iter = wordIds.begin(); iter!=wordIds.end(); ++iter)
+                                {
+                                        if(loaded.find(*iter) == loaded.end())
+                                        {
+                                                UDEBUG("Not found word %d", *iter);
+                                        }
+                                }
+                                UERROR("Query (%d) doesn't match loaded words (%d)", wordIds.size(), loaded.size());
+                        }
 
-			rc = sqlite3_reset(ppStmt);
-			UASSERT_MSG(rc == SQLITE_OK, uFormat("DB error (%s): %s", _version.c_str(), sqlite3_errmsg(_ppDb)).c_str());
-		}
+                        return;
+                }
+        }
 
-		// Finalize (delete) the statement
-		rc = sqlite3_finalize(ppStmt);
-		UASSERT_MSG(rc == SQLITE_OK, uFormat("DB error (%s): %s", _version.c_str(), sqlite3_errmsg(_ppDb)).c_str());
+	ULOGGER_DEBUG("size=%d", wordIds.size());
+	if(_ppDb && wordIds.size())
+	{
+                std::string type;
+                UTimer timer;
+                timer.start();
+                int rc = SQLITE_OK;
+                sqlite3_stmt * ppStmt = 0;
+                std::stringstream query;
+                std::set<int> loaded;
+
+                // Get the map from signature and visual words
+                query << "SELECT vw.descriptor_size, vw.descriptor "
+                                "FROM Word as vw "
+                                "WHERE vw.id = ?;";
+
+                rc = sqlite3_prepare_v2(_ppDb, query.str().c_str(), -1, &ppStmt, 0);
+                UASSERT_MSG(rc == SQLITE_OK, uFormat("DB error (%s): %s", _version.c_str(), sqlite3_errmsg(_ppDb)).c_str());
+
+                int descriptorSize;
+                const void * descriptor;
+                int dRealSize;
+                for(std::set<int>::const_iterator iter=wordIds.begin(); iter!=wordIds.end(); ++iter)
+                {
+                        // bind id
+                        rc = sqlite3_bind_int(ppStmt, 1, *iter);
+                        UASSERT_MSG(rc == SQLITE_OK, uFormat("DB error (%s): %s", _version.c_str(), sqlite3_errmsg(_ppDb)).c_str());
+
+                        // Process the result if one
+                        rc = sqlite3_step(ppStmt);
+                        if(rc == SQLITE_ROW)
+                        {
+                                int index = 0;
+                                descriptorSize = sqlite3_column_int(ppStmt, index++); // VisualWord descriptor size
+                                descriptor = sqlite3_column_blob(ppStmt, index); 	// VisualWord descriptor array
+                                dRealSize = sqlite3_column_bytes(ppStmt, index++);
+
+                                cv::Mat d;
+                                if(dRealSize == descriptorSize)
+                                {
+                                        // CV_8U binary descriptors
+                                        d = cv::Mat(1, descriptorSize, CV_8U);
+                                }
+                                else if(dRealSize/int(sizeof(float)) == descriptorSize)
+                                {
+                                        // CV_32F
+                                        d = cv::Mat(1, descriptorSize, CV_32F);
+                                }
+                                else
+                                {
+                                        UFATAL("Saved buffer size (%d bytes) is not the same as descriptor size (%d)", dRealSize, descriptorSize);
+                                }
+
+                                memcpy(d.data, descriptor, dRealSize);
+                                VisualWord * vw = new VisualWord(*iter, d);
+                                if(vw)
+                                {
+                                        vw->setSaved(true);
+                                }
+                                vws.push_back(vw);
+                                loaded.insert(loaded.end(), *iter);
+
+                                //JS
+                                if (write_cache) {
+                                        char* a = (char*) &dRealSize;
+                                        cache_fd.write((const char*) a,4); 
+                                        cache_fd.write((const char*) d.data,dRealSize); 
+                                }
+
+                                rc = sqlite3_step(ppStmt);
+                        }
+
+                        UASSERT_MSG(rc == SQLITE_DONE, uFormat("DB error (%s): %s", _version.c_str(), sqlite3_errmsg(_ppDb)).c_str());
+
+                        rc = sqlite3_reset(ppStmt);
+                        UASSERT_MSG(rc == SQLITE_OK, uFormat("DB error (%s): %s", _version.c_str(), sqlite3_errmsg(_ppDb)).c_str());
+                }
+
+                //JS
+                if (write_cache) {
+                        std::cout << "closing cache file";
+                        cache_fd.close();
+                }
+
+                // Finalize (delete) the statement
+                rc = sqlite3_finalize(ppStmt);
+                UASSERT_MSG(rc == SQLITE_OK, uFormat("DB error (%s): %s", _version.c_str(), sqlite3_errmsg(_ppDb)).c_str());
 
 		ULOGGER_DEBUG("Time=%fs", timer.ticks());
 
