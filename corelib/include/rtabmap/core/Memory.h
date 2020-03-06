@@ -218,6 +218,7 @@ public:
 	const Feature2D * getFeature2D() const {return _feature2D;}
 	bool isGraphReduced() const {return _reduceGraph;}
 	const std::vector<double> & getOdomMaxInf() const {return _odomMaxInf;}
+	bool isOdomGravityUsed() const {return _useOdometryGravity;}
 
 	void dumpMemoryTree(const char * fileNameTree) const;
 	virtual void dumpMemory(std::string directory) const;
@@ -346,7 +347,7 @@ private:
 	//Keypoint stuff
 	VWDictionary * _vwd;
 	Feature2D * _feature2D;
-	float _badSignRatio;;
+	float _badSignRatio;
 	bool _tfIdfLikelihoodUsed;
 	bool _parallelized;
 

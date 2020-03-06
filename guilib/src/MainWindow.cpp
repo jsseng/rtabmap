@@ -806,7 +806,7 @@ bool MainWindow::handleEvent(UEvent* anEvent)
 {
 	if(anEvent->getClassName().compare("IMUEvent") == 0)
 	{
-		// IMU events are published at high frequency, exit now
+		// IMU events are published at high frequency, early exit
 		return false;
 	}
 	else if(anEvent->getClassName().compare("RtabmapEvent") == 0)
@@ -1028,6 +1028,8 @@ void MainWindow::processOdometry(const rtabmap::OdometryEvent & odom, bool dataI
 		bool cloudUpdated = false;
 		bool scanUpdated = false;
 		bool featuresUpdated = false;
+		bool filteredGravityUpdated = false;
+		bool accelerationUpdated = false;
 		if(!pose.isNull())
 		{
 			// 3d cloud
@@ -1267,6 +1269,33 @@ void MainWindow::processOdometry(const rtabmap::OdometryEvent & odom, bool dataI
 						}
 					}
 				}
+
+				if(  _preferencesDialog->isIMUGravityShown(1) &&
+					(odom.data().imu().orientation().val[0]!=0 ||
+					odom.data().imu().orientation().val[1]!=0 ||
+					odom.data().imu().orientation().val[2]!=0 ||
+					odom.data().imu().orientation().val[3]!=0))
+				{
+					Eigen::Vector3f gravity(0,0,-_preferencesDialog->getIMUGravityLength(1));
+					Transform orientation(0,0,0, odom.data().imu().orientation()[0], odom.data().imu().orientation()[1], odom.data().imu().orientation()[2], odom.data().imu().orientation()[3]);
+					gravity = (orientation* odom.data().imu().localTransform().inverse()*(_odometryCorrection*pose).rotation().inverse()).toEigen3f()*gravity;
+					_cloudViewer->addOrUpdateLine("odom_imu_orientation", _odometryCorrection*pose, (_odometryCorrection*pose).translation()*Transform(gravity[0], gravity[1], gravity[2], 0, 0, 0)*pose.rotation().inverse(), Qt::yellow, true, true);
+					filteredGravityUpdated = true;
+				}
+				if( _preferencesDialog->isIMUAccShown() &&
+					(odom.data().imu().linearAcceleration().val[0]!=0 ||
+					odom.data().imu().linearAcceleration().val[1]!=0 ||
+					odom.data().imu().linearAcceleration().val[2]!=0))
+				{
+					Eigen::Vector3f gravity(
+							-odom.data().imu().linearAcceleration().val[0],
+							-odom.data().imu().linearAcceleration().val[1],
+							-odom.data().imu().linearAcceleration().val[2]);
+					gravity = gravity.normalized() * _preferencesDialog->getIMUGravityLength(1);
+					gravity = odom.data().imu().localTransform().toEigen3f()*gravity;
+					_cloudViewer->addOrUpdateLine("odom_imu_acc", _odometryCorrection*pose, _odometryCorrection*pose*Transform(gravity[0], gravity[1], gravity[2], 0, 0, 0), Qt::red, true, true);
+					accelerationUpdated = true;
+				}
 			}
 		}
 		if(!dataIgnored)
@@ -1286,6 +1315,14 @@ void MainWindow::processOdometry(const rtabmap::OdometryEvent & odom, bool dataI
 			if(!featuresUpdated && _cloudViewer->getAddedClouds().contains("featuresOdom"))
 			{
 				_cloudViewer->setCloudVisibility("featuresOdom", false);
+			}
+			if(!filteredGravityUpdated && _cloudViewer->getAddedLines().find("odom_imu_orientation") != _cloudViewer->getAddedLines().end())
+			{
+				_cloudViewer->removeLine("odom_imu_orientation");
+			}
+			if(!accelerationUpdated && _cloudViewer->getAddedLines().find("odom_imu_acc") != _cloudViewer->getAddedLines().end())
+			{
+				_cloudViewer->removeLine("odom_imu_acc");
 			}
 		}
 	}
@@ -1913,10 +1950,14 @@ void MainWindow::processStats(const rtabmap::Statistics & stat)
 
 		// Update statistics tool box
 		const std::map<std::string, float> & statistics = stat.data();
+		std::string odomStr =  "Odometry/";
 		for(std::map<std::string, float>::const_iterator iter = statistics.begin(); iter != statistics.end(); ++iter)
 		{
 			//ULOGGER_DEBUG("Updating stat \"%s\"", (*iter).first.c_str());
-			_ui->statsToolBox->updateStat(QString((*iter).first.c_str()).replace('_', ' '), _preferencesDialog->isTimeUsedInFigures()?stat.stamp()-_firstStamp:stat.refImageId(), (*iter).second, _preferencesDialog->isCacheSavedInFigures());
+			if((*iter).first.size()<odomStr.size() || (*iter).first.substr(0, odomStr.size()).compare(odomStr)!=0)
+			{
+				_ui->statsToolBox->updateStat(QString((*iter).first.c_str()).replace('_', ' '), _preferencesDialog->isTimeUsedInFigures()?stat.stamp()-_firstStamp:stat.refImageId(), (*iter).second, _preferencesDialog->isCacheSavedInFigures());
+			}
 		}
 
 		UDEBUG("time= %d ms", time.restart());
@@ -2235,6 +2276,7 @@ void MainWindow::updateMapCloud(
 	// Map updated! regenerate the assembled cloud, last pose is the new one
 	UDEBUG("Update map with %d locations", poses.size());
 	QMap<std::string, Transform> viewerClouds = _cloudViewer->getAddedClouds();
+	std::set<std::string> viewerLines = _cloudViewer->getAddedLines();
 	int i=1;
 	for(std::map<int, Transform>::const_iterator iter = poses.begin(); iter!=poses.end(); ++iter)
 	{
@@ -2407,6 +2449,29 @@ void MainWindow::updateMapCloud(
 				_cloudViewer->setCloudVisibility(featuresName.c_str(), false);
 			}
 
+			// Gravity arrows
+			std::string gravityName = uFormat("gravity%d", iter->first);
+			if(iter->first == 0)
+			{
+				viewerLines.erase(gravityName);
+				_cloudViewer->removeLine(gravityName);
+			}
+			if(_cloudViewer->isVisible() && _preferencesDialog->isIMUGravityShown(0))
+			{
+				std::multimap<int, Link>::const_iterator linkIter = graph::findLink(constraints, iter->first, iter->first, false, Link::kGravity);
+				if(linkIter != constraints.end())
+				{
+					Transform gravityT = linkIter->second.transform();
+					Eigen::Vector3f gravity(0,0,-_preferencesDialog->getIMUGravityLength(0));
+					gravity = (gravityT.rotation()*(iter->second).rotation().inverse()).toEigen3f()*gravity;
+					_cloudViewer->addOrUpdateLine(gravityName, iter->second, (iter->second).translation()*Transform(gravity[0], gravity[1], gravity[2], 0, 0, 0)*iter->second.rotation().inverse(), Qt::yellow, false, false);
+				}
+			}
+			else if(viewerLines.find(gravityName)!=viewerLines.end())
+			{
+				_cloudViewer->removeLine(gravityName.c_str());
+			}
+
 			if(verboseProgress)
 			{
 				_progressDialog->appendText(tr("Updated cloud %1 (%2/%3)").arg(iter->first).arg(i).arg(poses.size()));
@@ -2440,6 +2505,21 @@ void MainWindow::updateMapCloud(
 					UDEBUG("Hide %s", iter.key().c_str());
 					_cloudViewer->setCloudVisibility(iter.key(), false);
 				}
+			}
+		}
+	}
+	// remove not used gravity lines
+	for(std::set<std::string>::iterator iter = viewerLines.begin(); iter!=viewerLines.end(); ++iter)
+	{
+		std::list<std::string> splitted = uSplitNumChar(*iter);
+		int id = 0;
+		if(splitted.size() == 2)
+		{
+			id = std::atoi(splitted.back().c_str());
+			if(poses.find(id) == poses.end())
+			{
+				UDEBUG("Remove %s", iter->c_str());
+				_cloudViewer->removeLine(*iter);
 			}
 		}
 	}
