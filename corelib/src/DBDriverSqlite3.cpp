@@ -2558,18 +2558,18 @@ void DBDriverSqlite3::getAllLinksQuery(std::multimap<int, Link> & links, bool ig
 	}
 }
 
-void DBDriverSqlite3::getLastIdQuery(const std::string & tableName, int & id) const
+void DBDriverSqlite3::getLastIdQuery(const std::string & tableName, int & id, const std::string & fieldName) const
 {
 	if(_ppDb)
 	{
-		UDEBUG("get last id from table \"%s\"", tableName.c_str());
+		UDEBUG("get last %s from table \"%s\"", fieldName.c_str(), tableName.c_str());
 		UTimer timer;
 		timer.start();
 		int rc = SQLITE_OK;
 		sqlite3_stmt * ppStmt = 0;
 		std::stringstream query;
 
-		query << "SELECT max(id) "
+		query << "SELECT COALESCE(MAX(" << fieldName << "), " << id << ") " // In case the table is empty, return back input id
 			  << "FROM " << tableName
 			  << ";";
 
@@ -2587,7 +2587,7 @@ void DBDriverSqlite3::getLastIdQuery(const std::string & tableName, int & id) co
 		}
 		else
 		{
-			ULOGGER_ERROR("No result !?! from the DB");
+			UDEBUG("No result from the DB for table %s with field %s", tableName.c_str(), fieldName.c_str());
 		}
 
 		// Finalize (delete) the statement
@@ -3083,6 +3083,7 @@ void DBDriverSqlite3::loadSignaturesQuery(const std::list<int> & ids, std::list<
 			std::multimap<int, cv::KeyPoint> visualWords;
 			std::multimap<int, cv::Point3f> visualWords3;
 			std::multimap<int, cv::Mat> descriptors;
+			bool allWords3NaN = true;
 			cv::Point3f depth(0,0,0);
 
 			// Process the result if one
@@ -3134,6 +3135,11 @@ void DBDriverSqlite3::loadSignaturesQuery(const std::list<int> & ids, std::list<
 				visualWords.insert(visualWords.end(), std::make_pair(visualWordId, kpt));
 				visualWords3.insert(visualWords3.end(), std::make_pair(visualWordId, depth));
 
+				if(allWords3NaN && util3d::isFinite(depth))
+				{
+					allWords3NaN = false;
+				}
+
 				if(uStrNumCmp(_version, "0.11.2") >= 0)
 				{
 					descriptorSize = sqlite3_column_int(ppStmt, index++); // VisualWord descriptor size
@@ -3175,9 +3181,12 @@ void DBDriverSqlite3::loadSignaturesQuery(const std::list<int> & ids, std::list<
 			else
 			{
 				(*iter)->setWords(visualWords);
-				(*iter)->setWords3(visualWords3);
+				if(!allWords3NaN)
+				{
+					(*iter)->setWords3(visualWords3);
+				}
 				(*iter)->setWordsDescriptors(descriptors);
-				ULOGGER_DEBUG("Add %d keypoints, %d 3d points and %d descriptors to node %d", (int)visualWords.size(), (int)visualWords3.size(), (int)descriptors.size(), (*iter)->id());
+				ULOGGER_DEBUG("Add %d keypoints, %d 3d points and %d descriptors to node %d", (int)visualWords.size(), allWords3NaN?0:(int)visualWords3.size(), (int)descriptors.size(), (*iter)->id());
 			}
 
 			//reset
@@ -4294,6 +4303,7 @@ void DBDriverSqlite3::saveQuery(const std::list<Signature *> & signatures)
 		query = queryStepKeypoint();
 		rc = sqlite3_prepare_v2(_ppDb, query.c_str(), -1, &ppStmt, 0);
 		UASSERT_MSG(rc == SQLITE_OK, uFormat("DB error (%s): %s", _version.c_str(), sqlite3_errmsg(_ppDb)).c_str());
+		float nanFloat = std::numeric_limits<float>::quiet_NaN ();
 		for(std::list<Signature *>::const_iterator i=signatures.begin(); i!=signatures.end(); ++i)
 		{
 			UASSERT((*i)->getWords3().empty() || (*i)->getWords().size() == (*i)->getWords3().size());
@@ -4303,7 +4313,7 @@ void DBDriverSqlite3::saveQuery(const std::list<Signature *> & signatures)
 			std::multimap<int, cv::Mat>::const_iterator d=(*i)->getWordsDescriptors().begin();
 			for(std::multimap<int, cv::KeyPoint>::const_iterator w=(*i)->getWords().begin(); w!=(*i)->getWords().end(); ++w)
 			{
-				cv::Point3f pt(0,0,0);
+				cv::Point3f pt(nanFloat,nanFloat,nanFloat);
 				if(p!=(*i)->getWords3().end())
 				{
 					UASSERT(w->first == p->first); // must be same id!
@@ -4795,7 +4805,7 @@ cv::Mat DBDriverSqlite3::loadPreviewImageQuery() const
 
 void DBDriverSqlite3::saveOptimizedPosesQuery(const std::map<int, Transform> & poses, const Transform & lastlocalizationPose) const
 {
-	UDEBUG("");
+	UDEBUG("poses=%d lastlocalizationPose=%s", (int)poses.size(), lastlocalizationPose.prettyPrint().c_str());
 	if(_ppDb && uStrNumCmp(_version, "0.17.0") >= 0)
 	{
 		UTimer timer;

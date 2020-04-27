@@ -80,6 +80,7 @@ Memory::Memory(const ParametersMap & parameters) :
 	_saveIntermediateNodeData(Parameters::defaultMemIntermediateNodeDataKept()),
 	_rgbCompressionFormat(Parameters::defaultMemImageCompressionFormat()),
 	_incrementalMemory(Parameters::defaultMemIncrementalMemory()),
+	_localizationDataSaved(Parameters::defaultMemLocalizationDataSaved()),
 	_reduceGraph(Parameters::defaultMemReduceGraph()),
 	_maxStMemSize(Parameters::defaultMemSTMSize()),
 	_recentWmRatio(Parameters::defaultMemRecentWmRatio()),
@@ -345,7 +346,9 @@ void Memory::loadDataFromDb(bool postInitClosingEvents)
 
 		// Last id
 		_dbDriver->getLastNodeId(_idCount);
-		_idMapCount = _lastSignature?_lastSignature->mapId()+1:kIdStart;
+		_idMapCount = -1;
+		_dbDriver->getLastMapId(_idMapCount);
+		++_idMapCount;
 
 		// Now load the dictionary if we have a connection
 		if(postInitClosingEvents) UEventsManager::post(new RtabmapEventInit("Loading dictionary..."));
@@ -571,6 +574,7 @@ void Memory::parseParameters(const ParametersMap & parameters)
 	Parameters::parse(params, Parameters::kRGBDMarkerDetection(), _detectMarkers);
 	Parameters::parse(params, Parameters::kMarkerVarianceLinear(), _markerLinVariance);
 	Parameters::parse(params, Parameters::kMarkerVarianceAngular(), _markerAngVariance);
+	Parameters::parse(params, Parameters::kMemLocalizationDataSaved(), _localizationDataSaved);
 
 	UASSERT_MSG(_maxStMemSize >= 0, uFormat("value=%d", _maxStMemSize).c_str());
 	UASSERT_MSG(_similarityThreshold >= 0.0f && _similarityThreshold <= 1.0f, uFormat("value=%f", _similarityThreshold).c_str());
@@ -864,7 +868,7 @@ bool Memory::update(
 	}
 	if(stats) stats->setReducedIds(reducedIds);
 
-	if(!_memoryChanged && _incrementalMemory)
+	if(!_memoryChanged && (_incrementalMemory || _localizationDataSaved))
 	{
 		_memoryChanged = true;
 	}
@@ -2407,7 +2411,7 @@ void Memory::moveToTrash(Signature * s, bool keepLinkedToGraph, std::list<int> *
 		if(	(_notLinkedNodesKeptInDb || keepLinkedToGraph || s->isSaved()) &&
 			_dbDriver &&
 			s->id()>0 &&
-			(_incrementalMemory || s->isSaved()))
+			(_incrementalMemory || s->isSaved() || _localizationDataSaved))
 		{
 			if(keepLinkedToGraph)
 			{
@@ -3062,6 +3066,7 @@ Transform Memory::computeIcpTransformMulti(
 		pcl::PointCloud<pcl::PointNormal>::Ptr assembledToNormalClouds(new pcl::PointCloud<pcl::PointNormal>);
 		pcl::PointCloud<pcl::PointXYZI>::Ptr assembledToIClouds(new pcl::PointCloud<pcl::PointXYZI>);
 		pcl::PointCloud<pcl::PointXYZINormal>::Ptr assembledToNormalIClouds(new pcl::PointCloud<pcl::PointXYZINormal>);
+		UDEBUG("maxPoints from(%d) = %d", fromId, maxPoints);
 		for(std::map<int, Transform>::const_iterator iter = poses.begin(); iter!=poses.end(); ++iter)
 		{
 			if(iter->first != fromId)
@@ -3071,7 +3076,7 @@ Transform Memory::computeIcpTransformMulti(
 				{
 					LaserScan scan;
 					s->sensorData().uncompressData(0, 0, &scan);
-					if(!scan.isEmpty() && scan.format() == fromScan.format())
+					if(!scan.isEmpty() && scan.format() == toScan.format())
 					{
 						if(scan.hasIntensity())
 						{
@@ -3102,12 +3107,13 @@ Transform Memory::computeIcpTransformMulti(
 
 						if(scan.size() > maxPoints)
 						{
+							UDEBUG("maxPoints scan(%d) = %d", iter->first, (int)scan.size());
 							maxPoints = scan.size();
 						}
 					}
 					else if(!scan.isEmpty())
 					{
-						UWARN("Incompatible scan format %d vs %d", (int)fromScan.format(), (int)scan.format());
+						UWARN("Incompatible scan format %s vs %s", toScan.formatName().c_str(), scan.formatName().c_str());
 					}
 				}
 				else
@@ -3134,13 +3140,14 @@ Transform Memory::computeIcpTransformMulti(
 		{
 			assembledScan = fromScan.is2d()?util3d::laserScan2dFromPointCloud(*assembledToIClouds):util3d::laserScanFromPointCloud(*assembledToIClouds);
 		}
+		UDEBUG("assembledScan=%d points", assembledScan.cols);
 
 		// scans are in base frame but for 2d scans, set the height so that correspondences matching works
 		assembledData.setLaserScan(
 				LaserScan(assembledScan,
 					fromScan.maxPoints()?fromScan.maxPoints():maxPoints,
 					fromScan.rangeMax(),
-					fromScan.format(),
+					toScan.format(),
 					fromScan.is2d()?Transform(0,0,fromScan.localTransform().z(),0,0,0):Transform::getIdentity()));
 
 		t = _registrationIcpMulti->computeTransformation(fromS->sensorData(), assembledData, guess, info);
@@ -4001,8 +4008,7 @@ Signature * Memory::createSignature(const SensorData & inputData, const Transfor
 				 data.depthOrRightRaw().type() == CV_8UC1)
 			   &&
 				( (data.imageRaw().empty() && data.depthOrRightRaw().type() != CV_8UC1) ||
-				  (data.imageRaw().rows % data.depthOrRightRaw().rows == 0 && data.imageRaw().cols % data.depthOrRightRaw().cols == 0 &&
-				   data.depthOrRightRaw().rows <= data.imageRaw().rows && data.depthOrRightRaw().cols <= data.imageRaw().cols))),
+				  (data.depthOrRightRaw().rows <= data.imageRaw().rows && data.depthOrRightRaw().cols <= data.imageRaw().cols))),
 				uFormat("image=(%d/%d, type=%d, [accepted=%d,%d]) depth=(%d/%d, type=%d [accepted=%d(depth mm),%d(depth m),%d(stereo)]). "
 						"For stereo, left and right images should be same size. "
 						"For RGB-D, depth can be X times smaller than RGB (where X is an integer).",
@@ -4292,7 +4298,7 @@ Signature * Memory::createSignature(const SensorData & inputData, const Transfor
 							// Equidistant / FishEye
 							// get only k parameters (k1,k2,p1,p2,k3,k4)
 							cv::Mat D(1, 4, CV_64FC1);
-							D.at<double>(0,0) = decimatedData.cameraModels()[0].D_raw().at<double>(0,1);
+							D.at<double>(0,0) = decimatedData.cameraModels()[0].D_raw().at<double>(0,0);
 							D.at<double>(0,1) = decimatedData.cameraModels()[0].D_raw().at<double>(0,1);
 							D.at<double>(0,2) = decimatedData.cameraModels()[0].D_raw().at<double>(0,4);
 							D.at<double>(0,3) = decimatedData.cameraModels()[0].D_raw().at<double>(0,5);
@@ -4348,7 +4354,7 @@ Signature * Memory::createSignature(const SensorData & inputData, const Transfor
 								// Equidistant / FishEye
 								// get only k parameters (k1,k2,p1,p2,k3,k4)
 								cv::Mat D(1, 4, CV_64FC1);
-								D.at<double>(0,0) = decimatedData.cameraModels()[cameraIndex].D_raw().at<double>(0,1);
+								D.at<double>(0,0) = decimatedData.cameraModels()[cameraIndex].D_raw().at<double>(0,0);
 								D.at<double>(0,1) = decimatedData.cameraModels()[cameraIndex].D_raw().at<double>(0,1);
 								D.at<double>(0,2) = decimatedData.cameraModels()[cameraIndex].D_raw().at<double>(0,4);
 								D.at<double>(0,3) = decimatedData.cameraModels()[cameraIndex].D_raw().at<double>(0,5);
@@ -5163,7 +5169,8 @@ Signature * Memory::createSignature(const SensorData & inputData, const Transfor
 
 	{
 		Transform orientation(0,0,0, data.imu().orientation()[0], data.imu().orientation()[1], data.imu().orientation()[2], data.imu().orientation()[3]);
-		orientation*=data.imu().localTransform().rotation().inverse();
+		// orientation includes roll and pitch but not yaw in local transform
+		orientation= Transform(0,0,data.imu().localTransform().theta()) * orientation * data.imu().localTransform().rotation().inverse();
 
 		s->addLink(Link(s->id(), s->id(), Link::kGravity, orientation));
 		UDEBUG("Added gravity constraint: %s", orientation.prettyPrint().c_str());
@@ -5469,8 +5476,9 @@ void Memory::getMetricConstraints(
 			std::multimap<int, Link> tmpLinks = getLinks(*iter, lookInDatabase, true);
 			for(std::multimap<int, Link>::iterator jter=tmpLinks.begin(); jter!=tmpLinks.end(); ++jter)
 			{
+				std::multimap<int, Link>::iterator addedLinksIterator = graph::findLink(links, *iter, jter->first);
 				if(	jter->second.isValid() &&
-					graph::findLink(links, *iter, jter->first) == links.end() &&
+					(addedLinksIterator == links.end() || addedLinksIterator->second.from()==addedLinksIterator->second.to()) &&
 					(uContains(poses, jter->first) || (landmarksAdded && jter->second.type() == Link::kLandmark)))
 				{
 					if(!lookInDatabase &&
