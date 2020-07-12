@@ -4,6 +4,9 @@
 
 #include <superpoint_torch/SuperPoint.h>
 #include <rtabmap/utilite/ULogger.h>
+#include <rtabmap/utilite/UDirectory.h>
+#include <rtabmap/utilite/UFile.h>
+#include <rtabmap/utilite/UConversion.h>
 
 
 namespace rtabmap
@@ -119,10 +122,17 @@ SPDetector::SPDetector(const std::string & modelPath, float threshold, bool nms,
 	UDEBUG("modelPath=%s thr=%f nms=%d cuda=%d", modelPath.c_str(), threshold, nms?1:0, cuda?1:0);
 	if(modelPath.empty())
 	{
+		UERROR("Model's path is empty!");
+		return;
+	}
+	std::string path = uReplaceChar(modelPath, '~', UDirectory::homeDir());
+	if(!UFile::exists(path))
+	{
+		UERROR("Model's path \"%s\" doesn't exist!", path.c_str());
 		return;
 	}
 	model_ = std::make_shared<SuperPoint>();
-	torch::load(model_, modelPath);
+	torch::load(model_, uReplaceChar(path, '~', UDirectory::homeDir()));
 
 	if(cuda && !torch::cuda::is_available())
 	{
@@ -137,8 +147,10 @@ SPDetector::~SPDetector()
 {
 }
 
-std::vector<cv::KeyPoint> SPDetector::detect(const cv::Mat &img)
+std::vector<cv::KeyPoint> SPDetector::detect(const cv::Mat &img, const cv::Mat & mask)
 {
+	UASSERT(img.type() == CV_8UC1);
+	UASSERT(mask.empty() || (mask.type() == CV_8UC1 && img.cols == mask.cols && img.rows == mask.rows));
 	detected_ = false;
 	if(model_)
 	{
@@ -158,8 +170,11 @@ std::vector<cv::KeyPoint> SPDetector::detect(const cv::Mat &img)
 
 		std::vector<cv::KeyPoint> keypoints_no_nms;
 		for (int i = 0; i < kpts.size(0); i++) {
-			float response = prob_[kpts[i][0]][kpts[i][1]].item<float>();
-			keypoints_no_nms.push_back(cv::KeyPoint(kpts[i][1].item<float>(), kpts[i][0].item<float>(), 8, -1, response));
+			if(mask.empty() || mask.at<unsigned char>(kpts[i][0].item<int>(), kpts[i][1].item<int>()) != 0)
+			{
+				float response = prob_[kpts[i][0]][kpts[i][1]].item<float>();
+				keypoints_no_nms.push_back(cv::KeyPoint(kpts[i][1].item<float>(), kpts[i][0].item<float>(), 8, -1, response));
+			}
 		}
 
 		detected_ = true;
@@ -203,30 +218,35 @@ cv::Mat SPDetector::compute(const std::vector<cv::KeyPoint> &keypoints)
 	{
 		cv::Mat kpt_mat(keypoints.size(), 2, CV_32F);  // [n_keypoints, 2]  (y, x)
 
+		// Based on sample_descriptors() of SuperPoint implementation in SuperGlue:
+		// https://github.com/magicleap/SuperGluePretrainedNetwork/blob/45a750e5707696da49472f1cad35b0b203325417/models/superpoint.py#L80-L92
+		float s = 8;
 		for (size_t i = 0; i < keypoints.size(); i++) {
-			kpt_mat.at<float>(i, 0) = (float)keypoints[i].pt.y;
-			kpt_mat.at<float>(i, 1) = (float)keypoints[i].pt.x;
+			kpt_mat.at<float>(i, 0) = (float)keypoints[i].pt.y - s/2 + 0.5;
+			kpt_mat.at<float>(i, 1) = (float)keypoints[i].pt.x - s/2 + 0.5;
 		}
 
 		auto fkpts = torch::from_blob(kpt_mat.data, {(long int)keypoints.size(), 2}, torch::kFloat);
 
+		float w = desc_.size(3); //W/8
+		float h = desc_.size(2); //H/8
+
 		torch::Device device(cuda_?torch::kCUDA:torch::kCPU);
 		auto grid = torch::zeros({1, 1, fkpts.size(0), 2}).to(device);  // [1, 1, n_keypoints, 2]
-		grid[0][0].slice(1, 0, 1) = 2.0 * fkpts.slice(1, 1, 2) / prob_.size(1) - 1;  // x
-		grid[0][0].slice(1, 1, 2) = 2.0 * fkpts.slice(1, 0, 1) / prob_.size(0) - 1;  // y
+		grid[0][0].slice(1, 0, 1) = 2.0 * fkpts.slice(1, 1, 2) / (w*s - s/2 - 0.5) - 1;  // x
+		grid[0][0].slice(1, 1, 2) = 2.0 * fkpts.slice(1, 0, 1) / (h*s - s/2 - 0.5) - 1;  // y
 
 		auto desc = torch::grid_sampler(desc_, grid, 0, 0, true);  // [1, 256, 1, n_keypoints]
-		desc = desc.squeeze(0).squeeze(1);  // [256, n_keypoints]
 
 		// normalize to 1
-		auto dn = torch::norm(desc, 2, 1);
-		desc = desc.div(torch::unsqueeze(dn, 1));
+		desc = torch::nn::functional::normalize(desc.reshape({1, desc_.size(1), -1})); //[1, 256, n_keypoints]
+		desc = desc.squeeze(); //[256, n_keypoints]
+		desc = desc.transpose(0, 1).contiguous(); //[n_keypoints, 256]
 
-		desc = desc.transpose(0, 1).contiguous();  // [n_keypoints, 256]
 		if(cuda_)
 			desc = desc.to(torch::kCPU);
 
-		cv::Mat desc_mat(cv::Size(desc.size(1), desc.size(0)), CV_32FC1, desc.data<float>());
+		cv::Mat desc_mat(cv::Size(desc.size(1), desc.size(0)), CV_32FC1, desc.data_ptr<float>());
 
 		return desc_mat.clone();
 	}

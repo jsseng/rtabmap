@@ -62,7 +62,7 @@ public:
 	CameraRealSense2(
 		const std::string & deviceId = "",
 		float imageRate = 0,
-		const Transform & localTransform = Transform::getIdentity());
+		const Transform & localTransform = CameraModel::opticalRotation());
 	virtual ~CameraRealSense2();
 
 	virtual bool init(const std::string & calibrationFolder = ".", const std::string & cameraName = "");
@@ -83,6 +83,7 @@ public:
 	void setOdomProvided(bool enabled);
 
 #ifdef RTABMAP_REALSENSE2
+private:
 	void imu_callback(rs2::frame frame);
 	void pose_callback(rs2::frame frame);
 	void frame_callback(rs2::frame frame);
@@ -133,6 +134,7 @@ private:
 	bool dualMode_;
 	Transform dualExtrinsics_;
 	std::string jsonConfig_;
+	bool closing_;
 
 	static Transform realsense2PoseRotation_;
 	static Transform realsense2PoseRotationInv_;

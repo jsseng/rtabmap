@@ -47,10 +47,9 @@ using namespace rtabmap;
 void showUsage()
 {
 	printf("\nUsage:\n"
-#ifdef WITH_QT
 			"rtabmap-report [\"Statistic/Id\"] [options] path\n"
-#else
-			"rtabmap-report [options] path\n"
+#ifdef WITH_QT
+			"[Not built with Qt, statistics cannot be plotted]\n"
 #endif
 			"  path               Directory containing rtabmap databases or path of a database.\n"
 			"  Options:"
@@ -62,9 +61,53 @@ void showUsage()
 			"                         and compute error based on the scaled path.\n"
 			"    --poses            Export poses to [path]_poses.txt, ground truth to [path]_gt.txt\n"
 			"                         and valid ground truth indices to [path]_indices.txt \n"
-			"    --report           Export all statistics values in report.txt \n\n");
+			"    --stats            Show available statistics \"Statistic/Id\" to plot or get localization statistics (if path is a file). \n"
+#ifdef WITH_QT
+			"    --invert           When reading many databases, put all curves from a same \n"
+			"                       database in same figure, instead of all same curves from \n"
+			"                       different database in same figure. When reading a single \n"
+			"                       database, the inverse will be done. \n"
+			"    --ids              Use IDs for x axis instead of time in the figures. \n"
+			"    --start #          Start from this node ID for the figures.\n"
+#endif
+			"    --report           Export all evaluation statistics values in report.txt \n"
+			"    --loc #            Show localization statistics for each \"Statistic/Id\" per "
+			"                       session for 1=min,2=max,4=mean,8=stddev,16=total,32=nonnull%% "
+			"                       (it is a mask, we can combine those numbers, e.g., 63 for all) \n"
+			"    --help             Show usage\n\n");
 	exit(1);
 }
+
+struct LocStats
+{
+	static LocStats from(const std::vector<float> & array)
+	{
+		LocStats values;
+		values.mean = uMean(array);
+		values.stddev = std::sqrt(uVariance(array, values.mean));
+		uMinMax(array, values.min, values.max);
+		values.total = array.size();
+		values.nonNull = 0.0f;
+		if(!array.empty())
+		{
+			for(size_t j=0; j<array.size(); ++j)
+			{
+				if(array[j] != 0)
+				{
+					values.nonNull+=1.0f;
+				}
+			}
+			values.nonNull = values.nonNull/float(array.size());
+		}
+		return values;
+	}
+	float mean;
+	float stddev;
+	float min;
+	float max;
+	int total;
+	float nonNull;
+};
 
 int main(int argc, char * argv[])
 {
@@ -86,12 +129,22 @@ int main(int argc, char * argv[])
 	bool outputRelativeError = false;
 	bool outputReport = false;
 	bool outputLoopAccuracy = false;
+	bool showAvailableStats = false;
+	bool invertFigures = false;
+	bool useIds = false;
+	int startId = 0;
+	int showLoc = 0;
+	std::vector<std::string> statsToShow;
 #ifdef WITH_QT
 	std::map<std::string, UPlot*> figures;
 #endif
 	for(int i=1; i<argc-1; ++i)
 	{
-		if(strcmp(argv[i], "--latex") == 0)
+		if(strcmp(argv[i], "--help") == 0)
+		{
+			showUsage();
+		}
+		else if(strcmp(argv[i], "--latex") == 0)
 		{
 			outputLatex = true;
 		}
@@ -119,21 +172,91 @@ int main(int argc, char * argv[])
 		{
 			outputReport = true;
 		}
+		else if(strcmp(argv[i],"--stats") == 0)
+		{
+			showAvailableStats = true;
+		}
+		else if(strcmp(argv[i],"--invert") == 0)
+		{
+			invertFigures = true;
+		}
+		else if(strcmp(argv[i],"--ids") == 0)
+		{
+			useIds = true;
+		}
+		else if(strcmp(argv[i],"--loc") == 0)
+		{
+			++i;
+			if(i<argc-1)
+			{
+				showLoc = atoi(argv[i]);
+				printf("Localization statistics=%d (--loc)\n", showLoc);
+			}
+			else
+			{
+				printf("Missing type for \"--showLoc\" option.\n");
+				showUsage();
+			}
+		}
+		else if(strcmp(argv[i],"--start") == 0)
+		{
+			++i;
+			if(i<argc-1)
+			{
+				startId = atoi(argv[i]);
+				printf("Figures will be plotted from id=%d (--start)\n", startId);
+			}
+			else
+			{
+				printf("Missing id for \"--start\" option.\n");
+				showUsage();
+			}
+		}
 		else
 		{
-#ifdef WITH_QT
-			std::string figureTitle = argv[i];
-			printf("Plot %s\n", figureTitle.c_str());
-			UPlot * fig = new UPlot();
-			fig->setTitle(figureTitle.c_str());
-			fig->setXLabel("Time (s)");
-			figures.insert(std::make_pair(figureTitle, fig));
-#endif
+
+			statsToShow.push_back(argv[i]);
 		}
 	}
 
 	std::string path = argv[argc-1];
 	path = uReplaceChar(path, '~', UDirectory::homeDir());
+
+	if(!UDirectory::exists(path) && UFile::getExtension(path).compare("db") == 0)
+	{
+		invertFigures = !invertFigures;
+	}
+	std::map<std::string, std::map<std::string, std::vector<LocStats> > > localizationMultiStats; //<statsName, <Database<Session>> >
+	for(size_t i=0; i<statsToShow.size(); ++i)
+	{
+		std::string figureTitle = statsToShow[i];
+		if(!invertFigures)
+		{
+#ifdef WITH_QT
+			printf("Plot %s\n", figureTitle.c_str());
+			UPlot * fig = new UPlot();
+			fig->resize(QSize(640,480));
+			fig->setWindowTitle(figureTitle.c_str());
+			if(useIds)
+			{
+				fig->setXLabel("Node ID");
+			}
+			else
+			{
+				fig->setXLabel("Time (s)");
+			}
+			figures.insert(std::make_pair(figureTitle, fig));
+#endif
+		}
+		if(showLoc & 0b111111)
+		{
+			localizationMultiStats.insert(std::make_pair(figureTitle, std::map<std::string, std::vector<LocStats> >()));
+		}
+	}
+	if(!invertFigures)
+	{
+		statsToShow.clear();
+	}
 
 	std::string fileName;
 	std::list<std::string> paths;
@@ -153,6 +276,7 @@ int main(int argc, char * argv[])
 			if(UFile::getExtension(currentPath).compare("db") == 0)
 			{
 				currentPathIsDatabase=true;
+				localizationMultiStats.clear();
 				printf("Database: %s\n", currentPath.c_str());
 			}
 			else
@@ -185,6 +309,7 @@ int main(int argc, char * argv[])
 			}
 		}
 
+		// For all databases in currentDir
 		while(currentPathIsDatabase || !(fileName = currentDir.getNextFileName()).empty())
 		{
 			if(currentPathIsDatabase || UFile::getExtension(fileName).compare("db") == 0)
@@ -222,14 +347,92 @@ int main(int argc, char * argv[])
 					float maxOdomRAM = -1;
 					float maxMapRAM = -1;
 #ifdef WITH_QT
-					std::map<std::string, UPlotCurve*> curves;
-					std::map<std::string, double> firstStamps;
-					for(std::map<std::string, UPlot*>::iterator iter=figures.begin(); iter!=figures.end(); ++iter)
+					if(currentPathIsDatabase && showAvailableStats)
 					{
-						curves.insert(std::make_pair(iter->first, iter->second->addCurve(filePath.c_str())));
+						std::map<std::string, int> availableStats;
+						for(std::set<int>::iterator iter=ids.begin(); iter!=ids.end(); ++iter)
+						{
+							if(stats.find(*iter) != stats.end())
+							{
+								for(std::map<std::string, float>::iterator jter=stats.at(*iter).first.begin(); jter!=stats.at(*iter).first.end(); ++jter)
+								{
+									if(availableStats.find(jter->first) != availableStats.end())
+									{
+										++availableStats.at(jter->first);
+									}
+									else
+									{
+										availableStats.insert(std::make_pair(jter->first, 1));
+									}
+								}
+							}
+						}
+						printf("Showing available statistics in \"%s\":\n", filePath.c_str());
+						for(std::map<std::string, int>::iterator iter=availableStats.begin(); iter!=availableStats.end(); ++iter)
+						{
+							printf("%s (%d)\n", iter->first.c_str(), iter->second);
+						}
+						printf("\n");
+						exit(1);
+					}
+
+					std::map<std::string, UPlotCurve*> curves;
+					if(statsToShow.empty())
+					{
+						for(std::map<std::string, UPlot*>::iterator iter=figures.begin(); iter!=figures.end(); ++iter)
+						{
+							curves.insert(std::make_pair(iter->first, iter->second->addCurve(filePath.c_str())));
+							if(!localizationMultiStats.empty())
+								localizationMultiStats.at(iter->first).insert(std::make_pair(fileName, std::vector<LocStats>()));
+						}
+					}
+					else
+					{
+						UPlot * fig = new UPlot();
+						fig->setWindowTitle(filePath.c_str());
+						if(useIds)
+						{
+							fig->setXLabel("Node ID");
+						}
+						else
+						{
+							fig->setXLabel("Time (s)");
+						}
+						if(!figures.insert(std::make_pair(filePath.c_str(), fig)).second)
+						{
+							delete fig;
+							printf("Figure %s already added!\n", filePath.c_str());
+						}
+						else
+						{
+							for(size_t i=0; i<statsToShow.size(); ++i)
+							{
+								curves.insert(std::make_pair(statsToShow[i], fig->addCurve(statsToShow[i].c_str())));
+								if(!localizationMultiStats.empty())
+									localizationMultiStats.at(statsToShow[i]).insert(std::make_pair(fileName, std::vector<LocStats>()));
+							}
+						}
+					}
+#else
+					for(size_t i=0; i<statsToShow.size(); ++i)
+					{
+						if(!localizationMultiStats.empty())
+							localizationMultiStats.at(statsToShow[i]).insert(std::make_pair(fileName, std::vector<LocStats>()));
 					}
 #endif
 
+					// Find localization sessions and adjust startId
+					if(!localizationMultiStats.empty() && startId ==0)
+					{
+						std::map<int, Transform> poses = driver->loadOptimizedPoses();
+						if(!poses.empty())
+						{
+							startId = poses.rbegin()->first+1;
+						}
+					}
+
+					std::map<std::string, std::vector<float> > localizationSessionStats;
+					double previousStamp = 0.0;
 					for(std::set<int>::iterator iter=ids.begin(); iter!=ids.end(); ++iter)
 					{
 						Transform p, gt;
@@ -306,19 +509,60 @@ int main(int argc, char * argv[])
 #ifdef WITH_QT
 								for(std::map<std::string, UPlotCurve*>::iterator jter=curves.begin(); jter!=curves.end(); ++jter)
 								{
-									if(uContains(stat, jter->first))
+#else
+								for(std::map<std::string, std::map<std::string, std::vector<LocStats> > >::iterator jter=localizationMultiStats.begin();
+									jter!=localizationMultiStats.end();
+									++jter)
+								{
+#endif
+									if(*iter >= startId)
 									{
-										if(!uContains(firstStamps, jter->first))
+										if(uContains(stat, jter->first))
 										{
-											firstStamps.insert(std::make_pair(jter->first, s));
+											double y = stat.at(jter->first);
+#ifdef WITH_QT
+											double x = s;
+											if(useIds)
+											{
+												x = *iter;
+											}
+											jter->second->addValue(x,y);
+#endif
+
+											if(!localizationMultiStats.empty())
+											{
+												if(previousStamp > 0 && s - previousStamp > 10 && uContains(localizationSessionStats, jter->first))
+												{
+													// changed session
+													LocStats values = LocStats::from(localizationSessionStats.at(jter->first));
+													localizationMultiStats.at(jter->first).rbegin()->second.push_back(values);
+													localizationSessionStats.at(jter->first).clear();
+												}
+
+												if(!uContains(localizationSessionStats, jter->first))
+												{
+													localizationSessionStats.insert(std::make_pair(jter->first, std::vector<float>()));
+												}
+												localizationSessionStats.at(jter->first).push_back(y);
+											}
 										}
-										float x = s - firstStamps.at(jter->first);
-										float y = stat.at(jter->first);
-										jter->second->addValue(x,y);
 									}
 								}
-#endif
+								previousStamp = s;
 							}
+						}
+					}
+
+					for(std::map<std::string, std::map<std::string, std::vector<LocStats> > >::iterator jter=localizationMultiStats.begin();
+						jter!=localizationMultiStats.end();
+						++jter)
+					{
+						if(uContains(localizationSessionStats, jter->first) &&
+							!localizationSessionStats.at(jter->first).empty())
+						{
+							// changed session
+							LocStats values = LocStats::from(localizationSessionStats.at(jter->first));
+							localizationMultiStats.at(jter->first).rbegin()->second.push_back(values);
 						}
 					}
 
@@ -697,6 +941,51 @@ int main(int argc, char * argv[])
 			currentPathIsDatabase = false;
 		}
 
+		for(std::map<std::string, std::map<std::string, std::vector<LocStats> > >::iterator iter=localizationMultiStats.begin();
+			iter!=localizationMultiStats.end();
+			++iter)
+		{
+			printf("%s\n", iter->first.c_str());
+			for(int k=0; k<6; ++k)
+			{
+				if(showLoc & (0x1 << k))
+				{
+					printf("  %s:\n",
+							k==0?"min":
+							k==1?"max":
+							k==2?"mean":
+							k==3?"stddev":
+							k==4?"total":
+							"nonnull%");
+					for(std::map<std::string, std::vector<LocStats> >::iterator jter=iter->second.begin(); jter!=iter->second.end(); ++jter)
+					{
+						printf("    %s ", jter->first.c_str());
+						for(size_t j=0; j<jter->second.size(); ++j)
+						{
+							if(k<4)
+							{
+								printf("%f ",
+										k==0?jter->second[j].min:
+										k==1?jter->second[j].max:
+										k==2?jter->second[j].mean:
+										jter->second[j].stddev);
+							}
+							else if(k==4)
+							{
+								printf("%d ",jter->second[j].total);
+							}
+							else if(k==5)
+							{
+								printf("%.2f ", (jter->second[j].nonNull*100));
+							}
+						}
+						printf("\n");
+					}
+				}
+			}
+			iter->second.clear();
+		}
+
 		for(std::list<std::string>::iterator iter=subDirs.begin(); iter!=subDirs.end(); ++iter)
 		{
 			paths.push_front(*iter);
@@ -798,6 +1087,10 @@ int main(int argc, char * argv[])
 	{
 		for(std::map<std::string, UPlot*>::iterator iter=figures.begin(); iter!=figures.end(); ++iter)
 		{
+			if(!useIds)
+			{
+				iter->second->frameData();
+			}
 			iter->second->show();
 		}
 		return app.exec();

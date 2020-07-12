@@ -44,6 +44,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <pcl/pcl_base.h>
 #include <pcl/TextureMesh.h>
 
+
 // RTABMapApp handles the application lifecycle and resources.
 class RTABMapApp : public UEventsHandler {
  public:
@@ -55,6 +56,7 @@ class RTABMapApp : public UEventsHandler {
 
   int openDatabase(const std::string & databasePath, bool databaseInMemory, bool optimize, const std::string & databaseSource=std::string());
 
+  bool isBuiltWith(int cameraDriver) const;
   bool startCamera(JNIEnv* env, jobject iBinder, jobject context, jobject activity, int driver);
 
   // Allocate OpenGL resources for rendering, mainly for initializing the Scene.
@@ -108,6 +110,7 @@ class RTABMapApp : public UEventsHandler {
   void setCameraColor(bool enabled);
   void setFullResolution(bool enabled);
   void setSmoothing(bool enabled);
+  void setDepthFromMotion(bool enabled);
   void setAppendMode(bool enabled);
   void setDataRecorderMode(bool enabled);
   void setMaxCloudDepth(float value);
@@ -153,7 +156,7 @@ class RTABMapApp : public UEventsHandler {
   		float x, float y, float z, float qx, float qy, float qz, float qw,
   		float fx, float fy, float cx, float cy,
   		double stamp,
-  		void * rgb, int rgbLen, int rgbWidth, int rgbHeight, int rgbFormat,
+		void * yPlane, void * uPlane, void * vPlane, int yPlaneLen, int rgbWidth, int rgbHeight, int rgbFormat,
   		void * depth, int depthLen, int depthWidth, int depthHeight, int depthFormat,
 		float * points, int pointsLen);
 
@@ -181,6 +184,7 @@ class RTABMapApp : public UEventsHandler {
   bool trajectoryMode_;
   bool rawScanSaved_;
   bool smoothing_;
+  bool depthFromMotion_;
   bool cameraColor_;
   bool fullResolution_;
   bool appendMode_;
